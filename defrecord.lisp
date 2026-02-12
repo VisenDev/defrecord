@@ -5,76 +5,71 @@
                 #:slot-definition-name
                 #:slot-definition-initform
                 #:slot-definition-type
-                #:slot-definition-doc)
+                #:ensure-finalized)
   (:import-from #:alexandria
-                #:symbolicate)
+                #:symbolicate
+                #:compose
+                #:curry)
   (:export #:defrecord))
 (in-package #:defrecord)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defvar *defrecord-representation* :class)
 
-  (defun construct-slot-definition-form (slot)
+  (defun get-slot-definition-form (slot)
     (list (slot-definition-name slot)
           (slot-definition-initform slot)
           :type
           (slot-definition-type slot)
-          :documentation
-          (slot-definition-documentation))
-    )
+          :documentation (documentation slot t)))
 
-  (defun get-slot-forms (mixins)
-    ()
-    )
-  )
-(defmacro defrecord (name (&key includes) &body slots)
-  (ecase *defrecord-representation*
-    (:struct
-     `(defstruct
-          ,name ,@slots
-          ,@(mapcan (lambda (parent)
-                      (mapcar (lambda (slot)
-                                `(,(slot-definition-name slot)
-                                  ,(slot-definition-initform slot)
-                                  :type
-                                  ,(slot-definition-type slot)))
-                              (class-slots (find-class parent))))
-             includes)))
+  (defun get-mixin-slot-definition-forms (mixins)
+    ;; (mapcar (compose #'ensure-finalized #'find-class) mixins)
+    (mapcar #'get-slot-definition-form
+            (mapcan (compose #'class-slots #'find-class) mixins)))
 
-    (:class
-     `(progn (defclass ,name ,includes
-               ,(loop :for slot :in slots
-                      :collect
-                      (etypecase slot
-                        (symbol slot)
-                        (cons
-                         (destructuring-bind
-                             (slot-name default-value &key type documentation)
-                             slot
-                           `(,slot-name :accessor ,(symbolicate name '- slot-name)
-                                        :initform ,default-value
-                                        :type ,(or type t)
-                                        :documentation ,(or documentation ""))
-                           )))))
-             (defun ,(symbolicate 'make- name)
-                 (&key
-                    ,@(mapcar (lambda (slot)
-                                `(,(slot-definition-name slot)
-                                  ,(slot-definition-initform slot)))
-                              (mapcan #'class-slots includes))
-                    ,@(mapcar (lambda (slot)
-                                (destructuring-bind
-                                    (slot-name default-value &rest _)
-                                    slot
-                                  (declare (ignore _))
-                                  `(,slot-name ,default-value)))
-                              slots))
-               (let ((result (make-instance ',name)))
-                 (loop :for (name value) :in args :by #'cddr
-                       :do (setf (slot-value result name) value))
-                 result))))))
+  (defun normalize-record-slot-definition (slot)
+    (etypecase slot
+      (symbol `(,slot nil))
+      (cons slot)))
 
-(setf *defrecord-representation* :class)
+  (defun coerce-into-class-slot-definition (accessor-prefix record-slot-definition)
+    (if (symbolp record-slot-definition)
+        `(,record-slot-definition
+          :accessor ,(symbolicate accessor-prefix record-slot-definition))
+        (destructuring-bind
+            (slot-name default-value &key type documentation)
+            record-slot-definition
+          `(,slot-name :accessor ,(symbolicate accessor-prefix slot-name)
+                       :initform ,default-value
+                       :type ,(or type t)
+                       :documentation ,(or documentation ""))))))
+
+(defmacro defrecord (name (&key mixins accessor-prefix) &body slots)
+  (unless accessor-prefix
+    (setf accessor-prefix (symbolicate name '-)))
+  (let* ((normalized-slots (mapcar #'normalize-record-slot-definition slots))
+         (mixin-slots (get-mixin-slot-definition-forms mixins))
+         (all-slots (concatenate 'list normalized-slots mixin-slots)))
+    (ecase *defrecord-representation*
+      (:struct
+       `(defstruct ,name ,@all-slots))
+      (:class
+       (let ((class-slots (mapcar (curry #'coerce-into-class-slot-definition accessor-prefix)
+                                  all-slots))
+             (keyword-args (mapcar (lambda (slot) (list (first slot) (second slot)))
+                                   all-slots)))
+         `(progn
+            (defclass ,name () ,class-slots)
+            (defun ,(symbolicate 'make- name)
+                (&key ,@keyword-args)
+              (let ((result (make-instance ',name)))
+                ,@(loop :for slot :in all-slots
+                        :for slot-name = (first slot)
+                        :collect `(setf (slot-value result ',slot-name) ,slot-name))
+                result))))))))
+
+(setf *defrecord-representation* :struct)
 (defrecord vec2 ()
   (x 0.0 :type float)
   (y 0.0 :type float))
@@ -83,4 +78,5 @@
   (w 0.0 :type float)
   (h 0.0 :type float))
 
-(defrecord rect (:includes (vec2 size)))
+(defrecord rect (:mixins (vec2 size)))
+(find-class 'rect)
