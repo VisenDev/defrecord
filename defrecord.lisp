@@ -9,7 +9,8 @@
   (:import-from #:alexandria
                 #:symbolicate
                 #:compose
-                #:curry)
+                #:curry
+                #:with-gensyms)
   (:export #:defrecord))
 (in-package #:defrecord)
 
@@ -50,25 +51,42 @@
     (setf accessor-prefix (symbolicate name '-)))
   (let* ((normalized-slots (mapcar #'normalize-record-slot-definition slots))
          (mixin-slots (get-mixin-slot-definition-forms mixins))
-         (all-slots (concatenate 'list normalized-slots mixin-slots)))
-    (ecase *defrecord-representation*
-      (:struct
-       `(eval-when (:compile-toplevel :load-toplevel :execute)
-          (defstruct ,name ,@all-slots)))
-      (:class
-       (let ((class-slots (mapcar (curry #'coerce-into-class-slot-definition accessor-prefix)
-                                  all-slots))
-             (keyword-args (mapcar (lambda (slot) (list (first slot) (second slot)))
-                                   all-slots)))
-         `(eval-when (:compile-toplevel :load-toplevel :execute)
-            (defclass ,name () ,class-slots)
-            (defun ,(symbolicate 'make- name)
-                (&key ,@keyword-args)
-              (let ((result (make-instance ',name)))
-                ,@(loop :for slot :in all-slots
-                        :for slot-name = (first slot)
-                        :collect `(setf (slot-value result ',slot-name) ,slot-name))
-                result))))))))
+         (all-slots (concatenate 'list normalized-slots mixin-slots))
+         (instance (gensym))
+         (macrolet-bindings
+           (mapcar (lambda (slot)
+                     `(,(first slot)
+                       (,(symbolicate accessor-prefix
+                                      (first slot))
+                        ,Instance)))
+                   slots)))
+    `(eval-when (:compile-toplevel :load-toplevel :execute)
+       (defmacro ,(symbolicate 'with- name '-slots) (instance &body body)
+         `(let ((,',instance ,instance))
+           (symbol-macrolet ,',macrolet-bindings
+              ,@body)))
+       ,(ecase *defrecord-representation*
+          (:struct
+           `(defstruct ,name ,@all-slots))
+          (:class
+           (let ((class-slots
+                   (mapcar (curry #'coerce-into-class-slot-definition
+                                  accessor-prefix)
+                           all-slots))
+                 (keyword-args
+                   (mapcar (lambda (slot) (list (first slot) (second slot)))
+                           all-slots)))
+             `(progn
+                (defclass ,name () ,class-slots)
+                (defun ,(symbolicate 'make- name)
+                    (&key ,@keyword-args)
+                  (let ((result (make-instance ',name)))
+                    ,@(loop :for slot :in all-slots
+                            :for slot-name = (first slot)
+                            :collect `(setf
+                                       (slot-value result ',slot-name)
+                                       ,slot-name))
+                    result)))))))))
 
 (setf *defrecord-representation* :class)
 (defrecord vec2 ()
