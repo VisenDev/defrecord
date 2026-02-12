@@ -24,7 +24,7 @@
           :documentation (documentation slot t)))
 
   (defun get-mixin-slot-definition-forms (mixins)
-    ;; (mapcar (compose #'ensure-finalized #'find-class) mixins)
+    (mapcar (compose #'ensure-finalized #'find-class) mixins)
     (mapcar #'get-slot-definition-form
             (mapcan (compose #'class-slots #'find-class) mixins)))
 
@@ -53,13 +53,14 @@
          (all-slots (concatenate 'list normalized-slots mixin-slots)))
     (ecase *defrecord-representation*
       (:struct
-       `(defstruct ,name ,@all-slots))
+       `(eval-when (:compile-toplevel :load-toplevel :execute)
+          (defstruct ,name ,@all-slots)))
       (:class
        (let ((class-slots (mapcar (curry #'coerce-into-class-slot-definition accessor-prefix)
                                   all-slots))
              (keyword-args (mapcar (lambda (slot) (list (first slot) (second slot)))
                                    all-slots)))
-         `(progn
+         `(eval-when (:compile-toplevel :load-toplevel :execute)
             (defclass ,name () ,class-slots)
             (defun ,(symbolicate 'make- name)
                 (&key ,@keyword-args)
@@ -69,7 +70,7 @@
                         :collect `(setf (slot-value result ',slot-name) ,slot-name))
                 result))))))))
 
-(setf *defrecord-representation* :struct)
+(setf *defrecord-representation* :class)
 (defrecord vec2 ()
   (x 0.0 :type float)
   (y 0.0 :type float))
@@ -79,4 +80,3 @@
   (h 0.0 :type float))
 
 (defrecord rect (:mixins (vec2 size)))
-(find-class 'rect)
