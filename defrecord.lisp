@@ -15,18 +15,17 @@
 (in-package #:defrecord)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (defvar *defrecord-representation* :class)
+  (defvar *defrecord-representation* :class) ;; can be :class or :struct
 
-  (defun get-slot-definition-form (slot)
-    (list (slot-definition-name slot)
-          (slot-definition-initform slot)
+  (defun get-mop-slot-definition-form (mop-slot)
+    (list (slot-definition-name mop-slot)
+          (slot-definition-initform mop-slot)
           :type
-          (slot-definition-type slot)
-          :documentation (documentation slot t)))
+          (slot-definition-type mop-slot)))
 
   (defun get-mixin-slot-definition-forms (mixins)
     (mapcar (compose #'ensure-finalized #'find-class) mixins)
-    (mapcar #'get-slot-definition-form
+    (mapcar #'get-mop-slot-definition-form
             (mapcan (compose #'class-slots #'find-class) mixins)))
 
   (defun normalize-record-slot-definition (slot)
@@ -39,57 +38,78 @@
         `(,record-slot-definition
           :accessor ,(symbolicate accessor-prefix record-slot-definition))
         (destructuring-bind
-            (slot-name default-value &key type documentation)
+            (slot-name default-value &key type)
             record-slot-definition
           `(,slot-name :accessor ,(symbolicate accessor-prefix slot-name)
                        :initform ,default-value
-                       :type ,(or type t)
-                       :documentation ,(or documentation ""))))))
+                       :type ,(or type t)))))
+
+  (defun generate-class-slot-definitions (accessor-prefix slots)
+    (mapcar (curry #'coerce-into-class-slot-definition
+                   accessor-prefix)
+            slots))
+
+  (defun generate-make-function-keyword-args (slots)
+    (mapcar (lambda (slot) (list (first slot) (second slot)))
+            slots))
+  
+  (defun generate-macrolet-bindings (instance accessor-prefix slots)
+    (loop :for slot :in slots
+          :for name = (first slot)
+          :for accessor = (symbolicate accessor-prefix name)
+          :collect `(,name (,accessor ,instance)))))
 
 (defmacro defrecord (name (&key mixins accessor-prefix) &body slots)
   (unless accessor-prefix
     (setf accessor-prefix (symbolicate name '-)))
+
+  ;; Local Variables
   (let* ((normalized-slots (mapcar #'normalize-record-slot-definition slots))
          (mixin-slots (get-mixin-slot-definition-forms mixins))
          (all-slots (concatenate 'list normalized-slots mixin-slots))
-         (instance (gensym))
-         (macrolet-bindings
-           (mapcar (lambda (slot)
-                     `(,(first slot)
-                       (,(symbolicate accessor-prefix
-                                      (first slot))
-                        ,Instance)))
-                   slots)))
-    `(eval-when (:compile-toplevel :load-toplevel :execute)
-       (defmacro ,(symbolicate 'with- name '-slots) (instance &body body)
-         `(let ((,',instance ,instance))
-           (symbol-macrolet ,',macrolet-bindings
-              ,@body)))
-       ,(ecase *defrecord-representation*
-          (:struct
-           `(defstruct ,name ,@all-slots))
-          (:class
-           (let ((class-slots
-                   (mapcar (curry #'coerce-into-class-slot-definition
-                                  accessor-prefix)
-                           all-slots))
-                 (keyword-args
-                   (mapcar (lambda (slot) (list (first slot) (second slot)))
-                           all-slots)))
-             `(progn
-                (defclass ,name () ,class-slots)
-                (defun ,(symbolicate 'make- name)
-                    (&key ,@keyword-args)
-                  (let ((result (make-instance ',name)))
-                    ,@(loop :for slot :in all-slots
-                            :for slot-name = (first slot)
-                            :collect `(setf
-                                       (slot-value result ',slot-name)
-                                       ,slot-name))
-                    result)))))))))
+         (instance-name (gensym))
+         (macro-name (symbolicate 'with- name '-slots))
+         (make-function-name (symbolicate 'make- name)))
 
-(setf *defrecord-representation* :class)
-(defrecord vec2 ()
+    ;; The Generated Form
+    `(progn
+
+       ;; With Macro Definition 
+       (defmacro ,macro-name (instance &body body)
+         `(let ((,',instance-name ,instance))
+            (symbol-macrolet ,',(generate-macrolet-bindings
+                                 instance-name
+                                 accessor-prefix
+                                 all-slots)
+              ,@body)))
+
+       ;; Swap between Record Representation Types
+       ,(ecase *defrecord-representation*
+
+          ;; Struct
+          (:struct
+           `(eval-when (:compile-toplevel :load-toplevel)
+              (defstruct ,name ,@all-slots)))
+
+          ;; Class
+          (:class
+           `(progn
+              (eval-when (:compile-toplevel :load-toplevel)
+                (defclass ,name () ,(generate-class-slot-definitions accessor-prefix all-slots)))
+
+              ;; Class Make Function
+              (defun ,make-function-name (&key ,@(generate-make-function-keyword-args all-slots))
+                (let ((result (make-instance ',name)))
+                  ,@(loop :for slot :in all-slots
+                          :for slot-name = (first slot)
+                          :collect `(setf
+                                     (slot-value result ',slot-name)
+                                     ,slot-name))
+                  result))))))))
+
+
+;;; DEMO
+(defrecord vec2 (:accessor-prefix vec-)
   (x 0.0 :type float)
   (y 0.0 :type float))
 
@@ -97,4 +117,5 @@
   (w 0.0 :type float)
   (h 0.0 :type float))
 
-(defrecord rect (:mixins (vec2 size)))
+(defrecord rectangle (:mixins (vec2 size)
+                      :accessor-prefix rect-))
